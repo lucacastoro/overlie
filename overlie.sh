@@ -1,41 +1,73 @@
 #!/bin/bash
 
-set -e
-set -x
+name=${1:-rofl}
+overlay=$HOME/.overlies/$name
+root=$overlay/root
+secrets=$overlay/secrets
+uninstall=$overlay/uninstall.sh
 
-user=$USER
+whitelist=(/home)
+blacklist=()
 
-dir=$(mktemp -d)
+mkdir -p $overlay $root $secrets
 
-echo "temporary directory: $dir"
-
-cleanup() {
-  rm -rf $dir
+function mount {
+  if [ $UID -eq 0 ]; then
+    mount $@
+  else
+    sudo mount $@
+  fi
 }
 
-trap cleanup EXIT
+cat > $uninstall << EOF
+#!/bin/bash
 
-upper=$dir/upper
-work=$dir/work
-root=$dir/root
+set -e
 
-mkdir $upper $work $root
+function umount {
+  if [ \$UID -eq 0 ]; then
+    umount \$@
+  else
+    sudo umount \$@
+  fi
+}
 
-#
-# qui va la gestione dei namespace
-# vedi http://man7.org/linux/man-pages/man7/user_namespaces.7.html
-#
+EOF
 
-sudo mount -t overlay -o lowerdir=/,upperdir=$upper,workdir=$work none $root
-sudo mount --bind /proc $root/proc
-sudo mount --bind /sys $root/sys
-sudo mount --bind /run $root/run
-sudo mount --bind /dev $root/dev
 
-sudo chroot $root
+for entry in /*; do
+  to_skip=false
+  for b in "${blacklist[@]}"; do
+    if [ "$entry" == "$b" ]; then
+      to_skip=true
+    fi
+  done
 
-sudo umount $root/dev
-sudo umount $root/run
-sudo umount $root/sys
-sudo umount $root/proc
-sudo umount $root
+  if [ $to_skip == false ]; then
+    if [ -d $entry ]; then
+      mkdir $root$entry
+      was_safe=false
+      for w in "${whitelist[@]}"; do
+        if [ "$entry" == "$w" ]; then
+          was_safe=true
+          mount -R $entry $root$entry
+        fi
+      done
+
+      if [ $was_safe == false ]; then
+        upper=$secrets$entry/upper
+        work=$secrets$entry/work
+        mkdir -p $upper $work
+        mount -t overlay -o lowerdir=$entry,upperdir=$upper,workdir=$work none $root$entry
+      fi
+      echo "umount $root$entry" >> $uninstall
+    else
+      ln -s $entry $root$entry
+      echo "unlink $root$entry" >> $uninstall
+    fi
+  fi
+done
+
+echo "rm -rf $overlay" >> $uninstall
+
+chmod +x $uninstall
